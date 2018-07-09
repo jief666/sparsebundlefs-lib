@@ -1,6 +1,10 @@
 #define _FILE_OFFSET_BITS 64
 #define FUSE_USE_VERSION 26
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // strdup is undefined if I don't include that on some plateform.
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
