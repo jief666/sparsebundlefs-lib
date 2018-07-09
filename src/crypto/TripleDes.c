@@ -13,8 +13,8 @@
 void TripleDesInit()
 {
 	DesInit();
-	bzero(&m_keySchedule, sizeof(m_keySchedule));
-	bzero(&m_iv, sizeof(m_iv));
+	memset(&m_keySchedule, 0, sizeof(m_keySchedule));
+	memset(&m_iv, 0, sizeof(m_iv));
 }
 
 void TripleDesDecryptCBC(uint8_t * plain, const uint8_t * cipher, size_t size)

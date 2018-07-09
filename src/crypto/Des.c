@@ -132,8 +132,8 @@ const unsigned int m_shifts[16] = {
 
 void DesInit()
 {
-	bzero(&m_keySchedule, sizeof(m_keySchedule));
-	bzero(&m_initVector, sizeof(m_initVector));
+	memset(&m_keySchedule, 0, sizeof(m_keySchedule));
+	memset(&m_initVector, 0, sizeof(m_initVector));
 }
 
 uint64_t BytesToU64(const uint8_t *data)
