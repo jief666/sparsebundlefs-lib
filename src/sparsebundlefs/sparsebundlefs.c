@@ -5,7 +5,7 @@
 #define syslog(Level, ...)  do { printf(__VA_ARGS__); printf("\n"); } while (0)
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE // looks like I need that to get asprintf... sometimes.
+#define _GNU_SOURCE // looks like I need that to get be32toh, getpass, etc... sometimes.
 #endif
 
 #include <stdio.h>
@@ -837,6 +837,9 @@ uint64_t xpath_get_integer(const char* filename, const xmlChar* xpathExpr) {
 
 int sparsebundlefs_open(const char* path, const char* password, void* sparsebundle_data_void)
 {
+    char printf_zerobuf[1];
+    int printf_size;
+
     if (!path) {
     	errno = ENOENT;
         return -1;
@@ -860,17 +863,13 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
     {
       struct stat st;
       cencrypted_v2_header v2header;
-      char* token_filename;
-    	if ( asprintf(&token_filename, "%s/token", sparsebundle_data->path) < strlen("token") ) {
-  			syslog(LOG_ERR, "Failed to asprintf token path '%s/token'. %s (errno %d)", sparsebundle_data->path, strerror(errno), errno);
-        	return EXIT_FAILURE;
-    	}
+        printf_size = snprintf(printf_zerobuf, 0, "%s/token", sparsebundle_data->path);
+	    char token_filename[printf_size+1];
+    	snprintf(token_filename, printf_size+1, "%s/token", sparsebundle_data->path);
     	if ( stat(token_filename, &st) != 0 ) {
   			syslog(LOG_ERR, "Failed to stat token file '%s'. %s (errno %d)", token_filename, strerror(errno), errno);
-    		free(token_filename);
         	return EXIT_FAILURE;
     	}
-    	free(token_filename);
     	if (st.st_size > (off_t)(sizeof(cencrypted_v2_header)))
     	{
 			#ifndef CRYPTO_AVAILABLE
@@ -898,25 +897,19 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
 
     }
 
-    char *plist_path;
-    if (asprintf(&plist_path, "%s/Info.plist", sparsebundle_data->path) == -1) {
-		syslog(LOG_ERR, "Failed to asprintf Info.plist path '%s/Info.plist'. %s (errno %d)", plist_path, strerror(errno), errno);
-        perror("Failed to resolve Info.plist path");
-        return EXIT_FAILURE;
-    }
+    printf_size = snprintf(printf_zerobuf, 0, "%s/Info.plist", sparsebundle_data->path);
+    char plist_path[printf_size+1];
+    snprintf(plist_path, printf_size+1, "%s/Info.plist", sparsebundle_data->path);
 	sparsebundle_data->band_size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='band-size']/following-sibling::integer[1]");
 	if ( sparsebundle_data->band_size == 0 ) {
 		free(sparsebundle_data->path);
-		free(plist_path);
 		return ENXIO;
 	}
 	sparsebundle_data->size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='size']/following-sibling::integer[1]");
 	if ( sparsebundle_data->size == 0 ) {
 		free(sparsebundle_data->path);
-		free(plist_path);
 		return ENXIO;
 	}
-    free(plist_path);
 
 #ifdef CRYPTO_AVAILABLE
 	#ifdef SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO
