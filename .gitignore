@@ -2,3 +2,5 @@
 /.cproject
 /.settings/
 /build_*/
+/copy DebugArm to Syno
+/copy ReleaseArm to Syno
