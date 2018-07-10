@@ -1,5 +1,10 @@
 // _FILE_OFFSET_BITS 64 is needed for large file. Don't know if it's enough to put it here or if it must be defined globally
+#ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
+#endif
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 26
+#endif
 
 // Comment next line if you want debug message on syslog
 #define syslog(Level, ...)  do { printf(__VA_ARGS__); printf("\n"); } while (0)
@@ -652,7 +657,7 @@ int sparsebundle_iterate_bands(sparsebundle_data_t* sparsebundle_data, uint8_t* 
 
 if ( last_band_number == band_number && last_band_offset == band_offset ) {
 	cache2_hit++;
-	printf("cache2 would hit %d times\n", cache2_hit);
+//	printf("cache2 would hit %d times\n", cache2_hit);
 }
 last_band_number = band_number;
 last_band_offset = band_offset;
@@ -933,7 +938,7 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
 	return 0;
 }
 
-size_t sparsebundlefs_getsize(void* sparsebundle_data)
+off_t sparsebundlefs_getsize(void* sparsebundle_data)
 {
 	return ((sparsebundle_data_t*)sparsebundle_data)->size;
 }
