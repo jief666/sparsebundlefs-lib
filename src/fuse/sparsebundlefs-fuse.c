@@ -1,5 +1,10 @@
+// _FILE_OFFSET_BITS 64 is needed for large file. Don't know if it's enough to put it here or if it must be defined globally
+#ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
+#endif
+#ifndef FUSE_USE_VERSION
 #define FUSE_USE_VERSION 26
+#endif
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // strdup is undefined if I don't include that on some plateform.
@@ -94,6 +99,9 @@ static int sparsebundle_fuse_getattr(const char *path, struct stat *stbuf)
     stbuf->st_atime = bundle_stat.st_atime;
     stbuf->st_mtime = bundle_stat.st_mtime;
     stbuf->st_ctime = bundle_stat.st_ctime;
+
+    stbuf->st_uid = geteuid();
+    stbuf->st_gid = getegid();
 
     return 0;
 }
