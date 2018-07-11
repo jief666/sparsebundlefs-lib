@@ -22,6 +22,7 @@
 #include <inttypes.h> // for PRIx64...
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <assert.h>
 #ifndef syslog
 #include <syslog.h>
@@ -39,7 +40,9 @@
 #endif
 #include <arpa/inet.h> // for htonl
 
+#ifdef SPARSEBUNDLEFS_USE_LIBXML2
 #include <libxml/xpath.h>
+#endif
 
 #include "sparsebundlefs.h"
 
@@ -776,6 +779,7 @@ int sparsebundlefs_close(void* sparsebundle_data)
     return 0;
 }
 
+#ifdef SPARSEBUNDLEFS_USE_LIBXML2
 uint64_t xpath_get_integer(const char* filename, const xmlChar* xpathExpr) {
     xmlDocPtr doc;
     xmlXPathContextPtr xpathCtx;
@@ -839,6 +843,67 @@ uint64_t xpath_get_integer(const char* filename, const xmlChar* xpathExpr) {
 
     return(rv);
 }
+#else
+uint64_t xml_get_integer(const char* filename, const char* elem)
+{
+	FILE *f = fopen(filename, "rb");
+	if ( fseek(f, 0, SEEK_END) != 0 ) return 0;
+	long fsize = ftell(f);
+	if ( fseek(f, 0, SEEK_SET) != 0 ) return 0;  //same as rewind(f);
+
+	char token[fsize + 1];
+	if ( fread(token, 1, fsize, f) != fsize ) return 0;
+	fclose(f);
+	token[fsize] = 0;
+
+	char* bufferPtr = token;
+
+	while (bufferPtr)
+	{
+		char* posKey = strstr(bufferPtr, "<key>");
+		if ( !posKey ) return 0;
+		posKey += strlen("<key>");
+		while ( *posKey == ' ' || *posKey == '\r' || *posKey == '\n' || *posKey == '\t' ) posKey++;
+
+		char* posKeyEnd = strstr(bufferPtr, "</key>");
+		if ( !posKeyEnd ) return 0;
+		bufferPtr = posKeyEnd + strlen("</key>");
+		while ( *(posKey-1) == ' ' || *(posKey-1) == '\r' || *(posKey-1) == '\n' || *(posKey-1) == '\t' ) posKey--;
+		*posKeyEnd = 0;
+
+		if ( strcmp(posKey, elem) == 0 )
+		{
+			char* posValue = bufferPtr;
+			while ( *posValue == ' ' || *posValue == '\r' || *posValue == '\n' || *posValue == '\t' ) posValue++;
+			if ( strncmp(posValue, "<integer>", strlen("<integer>")) != 0 ) return 0;
+			posValue += strlen("<integer>");
+			while ( *posValue == ' ' || *posValue == '\r' || *posValue == '\n' || *posValue == '\t' ) posValue++;
+
+			char* posValueEnd = strstr(bufferPtr, "</integer>");
+			if ( !posValueEnd ) return 0;
+			bufferPtr = posValueEnd + strlen("</integer>"); // for just after
+			while ( *(posValueEnd-1) == ' ' || *(posValueEnd-1) == '\r' || *(posValueEnd-1) == '\n' || *(posValueEnd-1) == '\t' ) posValueEnd--;
+			*posValueEnd = 0;
+
+			uint64_t rv = strtoumax(posValue, 0, 10);
+			return rv;
+
+		}
+	}
+	return 0;
+//
+//	char* pos = strstr(token, elem);
+//	if ( !pos ) return 0;
+//	while ( *pos == ' ' || *pos == '\r' || *pos == '\n' ) pos++;
+//	if ( strcmp(pos, "<integer>", strlen("<integer>") != 0 ) return 0;
+//	pos += strlen("<integer>");
+//	const char* pos2 = strstr(pos, "</integer>", strlen("</integer>");
+//	if ( !pos2 ) return 0;
+//	*pos2 = 0;
+//	uint64_t rv = strtoumax(pos, 0, 10);
+//	return rv;
+}
+#endif
 
 int sparsebundlefs_open(const char* path, const char* password, void* sparsebundle_data_void)
 {
@@ -905,13 +970,20 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
     printf_size = snprintf(printf_zerobuf, 0, "%s/Info.plist", sparsebundle_data->path);
     char plist_path[printf_size+1];
     snprintf(plist_path, printf_size+1, "%s/Info.plist", sparsebundle_data->path);
-	sparsebundle_data->band_size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='band-size']/following-sibling::integer[1]");
+    #ifdef SPARSEBUNDLEFS_USE_LIBXML2
+		sparsebundle_data->band_size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='band-size']/following-sibling::integer[1]");
+		sparsebundle_data->size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='size']/following-sibling::integer[1]");
+	#else
+		sparsebundle_data->band_size = xml_get_integer(plist_path, "band-size");
+		sparsebundle_data->size = xml_get_integer(plist_path, "size");
+	#endif
 	if ( sparsebundle_data->band_size == 0 ) {
+		syslog(LOG_ERR, "Cannot get band_size from token '%s'", plist_path);
 		free(sparsebundle_data->path);
 		return ENXIO;
 	}
-	sparsebundle_data->size = xpath_get_integer(plist_path, (const xmlChar*)"/plist/dict/key[.='size']/following-sibling::integer[1]");
 	if ( sparsebundle_data->size == 0 ) {
+		syslog(LOG_ERR, "Cannot get band_size from token '%s'", plist_path);
 		free(sparsebundle_data->path);
 		return ENXIO;
 	}
