@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) 2012-2016 Tor Arne Vestbø. All rights reserved.
+ * Copyright (c) 2018 Jief Luce.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Jief Luce, 2018.
+ *   Base on Tor Arne Vestbø work, I separated fuse and sparsebundle handling.
+ *   Then, I added encryption support.
+*/
+
 // _FILE_OFFSET_BITS 64 is needed for large file. Don't know if it's enough to put it here or if it must be defined globally
 #ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
@@ -96,6 +125,9 @@ static int sparsebundle_fuse_getattr(const char *path, struct stat *stbuf)
     } else
         return -ENOENT;
 
+    #ifdef __APPLE__
+    	stbuf->st_birthtimespec = bundle_stat.st_birthtimespec;
+    #endif
     stbuf->st_atime = bundle_stat.st_atime;
     stbuf->st_mtime = bundle_stat.st_mtime;
     stbuf->st_ctime = bundle_stat.st_ctime;
