@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) 2012-2016 Tor Arne Vestbø. All rights reserved.
+ * Copyright (c) 2018 Jief Luce.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Jief Luce, 2018.
+ *   Base on Tor Arne Vestbø work, I separated fuse and sparsebundle handling.
+ *   Then, I added encryption support.
+*/
+
 // _FILE_OFFSET_BITS 64 is needed for large file. Don't know if it's enough to put it here or if it must be defined globally
 #ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
@@ -122,7 +151,7 @@ typedef struct sparsebundle_data_st
     off_t band_size;
     size_t blocksize;
     off_t size;
-    int opened_file_band_number;
+    off_t opened_file_band_number;
     int opened_file_fd;
 	read_band_func_type read_band_func;
 
@@ -263,6 +292,7 @@ void dump_v2_password_header(cencrypted_v2_password_header *pwhdr)
 void adjust_v2_header_byteorder(cencrypted_v2_header *v2header)
 {
 	v2header->blocksize = be32toh(v2header->blocksize);
+	v2header->encMode = be32toh(v2header->encMode);
 	v2header->datasize = be64toh(v2header->datasize);
 	v2header->dataoffset = be64toh(v2header->dataoffset);
 	v2header->keycount = be32toh(v2header->keycount);
@@ -544,12 +574,14 @@ void compute_iv(uint32_t chunk_no, uint8_t *iv, sparsebundle_data_t* sparsebundl
 	unsigned char mdResultOpenSsl[MD_LENGTH];
 	unsigned int mdLenOpenSsl;
 
-    HMAC_CTX hmacsha1_ctx;
-	HMAC_CTX_init(&hmacsha1_ctx);
-	HMAC_Init_ex(&hmacsha1_ctx, sparsebundle_data->hmacsha1_key, sizeof(sparsebundle_data->hmacsha1_key), EVP_sha1(), NULL);
-	HMAC_Update(&hmacsha1_ctx, (const unsigned char *) &chunk_no, sizeof(uint32_t));
-	HMAC_Final(&hmacsha1_ctx, mdResultOpenSsl, &mdLenOpenSsl);
-	HMAC_CTX_cleanup(&hmacsha1_ctx);
+//    HMAC_CTX hmacsha1_ctx;
+//	HMAC_CTX_init(&hmacsha1_ctx);
+//	HMAC_Init_ex(&hmacsha1_ctx, sparsebundle_data->hmacsha1_key, sizeof(sparsebundle_data->hmacsha1_key), EVP_sha1(), NULL);
+//	HMAC_Update(&hmacsha1_ctx, (const unsigned char *) &chunk_no, sizeof(uint32_t));
+//	HMAC_Final(&hmacsha1_ctx, mdResultOpenSsl, &mdLenOpenSsl);
+//	HMAC_CTX_cleanup(&hmacsha1_ctx);
+	
+	HMAC(EVP_sha1(), sparsebundle_data->hmacsha1_key, sizeof(sparsebundle_data->hmacsha1_key), (const unsigned char *) &chunk_no, sizeof(uint32_t), mdResultOpenSsl, &mdLenOpenSsl);
 
 //	HMAC_CTX_init(&sparsebundle_data->hmacsha1_ctx);
 //	HMAC_Init_ex(&sparsebundle_data->hmacsha1_ctx, sparsebundle_data->hmacsha1_key, sizeof(sparsebundle_data->hmacsha1_key), EVP_sha1(), NULL);
@@ -572,12 +604,12 @@ void compute_iv(uint32_t chunk_no, uint8_t *iv, sparsebundle_data_t* sparsebundl
 #endif
 }
 
-
+// TODO : decrypt in other buffer
 void decrypt_chunk(void *crypted_buffer, uint32_t chunk_no, sparsebundle_data_t* sparsebundle_data)
 {
 	uint8_t iv[CIPHER_BLOCKSIZE];
 
-#if defined(SPARSEBUNDLEFS_USE_OPENSSL) && defined(SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO)
+#if defined(COMPARE_OPENSSL_AND_EMBEDDED_CRYPTO)
 	uint8_t crypted_buffer_sav[sparsebundle_data->blocksize];
 	memcpy(crypted_buffer_sav, crypted_buffer, sparsebundle_data->blocksize);
 #endif
@@ -594,7 +626,7 @@ void decrypt_chunk(void *crypted_buffer, uint32_t chunk_no, sparsebundle_data_t*
 //print_hex(decrypted_buffer_openssl, sparsebundle_data->blocksize, "decrypted_buffer_openssl=");
 #endif
 
-#if defined(SPARSEBUNDLEFS_USE_OPENSSL) && defined(SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO)
+#if defined(COMPARE_OPENSSL_AND_EMBEDDED_CRYPTO)
 	memcpy(crypted_buffer, crypted_buffer_sav, sparsebundle_data->blocksize);
 #endif
 
@@ -1004,7 +1036,7 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
 		}
 	#endif
 #else
-		syslog(LOG_DEBUG, "Initialized %s, band size %" PRId64", total size %" PRId64 " not encrypted", sparsebundle_data->path, sparsebundle_data->band_size, sparsebundle_data->size);
+		syslog(LOG_DEBUG, "Initialized %s, band size %" PRId64", total size %" PRId64, sparsebundle_data->path, sparsebundle_data->band_size, sparsebundle_data->size);
 #endif
 
 	return 0;
