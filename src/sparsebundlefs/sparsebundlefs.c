@@ -681,9 +681,10 @@ int sparsebundle_iterate_bands(sparsebundle_data_t* sparsebundle_data, uint8_t* 
         	sparsebundle_data->opened_file_fd = open(band_path, O_RDONLY);
         	if ( sparsebundle_data->opened_file_fd == -1 ) {
         		sparsebundle_data->opened_file_band_number = -1;
-        		return -1;
+        		// some zeros will be returned
+        	}else{
+        		sparsebundle_data->opened_file_band_number = band_number;
         	}
-        	sparsebundle_data->opened_file_band_number = band_number;
         }else{
         	//to get an idea if this cache is useful, uncomment the following
         	//cache_hit++;
@@ -699,9 +700,14 @@ last_band_offset = band_offset;
 
 //syslog(LOG_DEBUG, "processing %zu/%zu bytes from band %" PRId64" at offset %" PRId64, to_read, bytes_read, band_number, band_offset);
 
-        ssize_t read = sparsebundle_data->read_band_func(sparsebundle_data, buffer+bytes_read, to_read, band_offset);
-        if (read < 0) {
-            return -1;
+        ssize_t read;
+        if ( sparsebundle_data->opened_file_fd > -1 ) {
+        	read = sparsebundle_data->read_band_func(sparsebundle_data, buffer+bytes_read, to_read, band_offset);
+			if (read < 0) {
+				return -1;
+			}
+        }else{
+        	read = 0;
         }
 
         if (read < to_read) {
