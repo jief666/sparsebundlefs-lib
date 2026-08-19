@@ -32,7 +32,7 @@
 #define _FILE_OFFSET_BITS 64
 #endif
 #ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 35
 #endif
 
 #ifndef _GNU_SOURCE
@@ -56,9 +56,14 @@
 #include <stddef.h>
 
 #include <fuse.h>
+#include <fuse_lowlevel.h>  // for fuse_cmdline_opts / fuse_parse_cmdline
 
 #include "../sparsebundlefs/sparsebundlefs.h"
 //#include "../sparsebundleutil.h"
+
+/* Cap libfuse3's worker-thread pool. libfuse3's own default sentinel
+ * (UINT_MAX) trips a bogus "max threads invalid" warning, so we pin it. */
+#define SPARSEBUNDLEFS_MAX_THREADS 10
 
 static const char image_path[] = "/sparsebundle.dmg";
 void* sparsebundlefr_data_ptr;
@@ -106,8 +111,9 @@ static int sparsebundle_opt_proc(void *data, const char *arg, int key, struct fu
     return 1;
 }
 
-static int sparsebundle_fuse_getattr(const char *path, struct stat *stbuf)
+static int sparsebundle_fuse_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 {
+    (void)fi;
 //syslog(LOG_DEBUG, "sparsebundle_getattr");
     memset(stbuf, 0, sizeof(struct stat));
 
@@ -167,19 +173,20 @@ int sparsebundle_fuse_read(const char *path, char *buffer, size_t length, off_t 
 	return (int)rv;
 }
 
-int sparsebundle_fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi)
+int sparsebundle_fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
 {
+    (void)offset; (void)fi; (void)flags;
 //syslog(LOG_DEBUG, "sparsebundle_readdir");
 
     if (strcmp(path, "/") != 0)
         return -ENOENT;
 
     struct stat image_stat;
-    sparsebundle_fuse_getattr(image_path, &image_stat);
+    sparsebundle_fuse_getattr(image_path, &image_stat, NULL);
 
-    filler(buf, ".", 0, 0);
-    filler(buf, "..", 0, 0);
-    filler(buf, image_path + 1, &image_stat, 0);
+    filler(buf, ".", 0, 0, (enum fuse_fill_dir_flags)0);
+    filler(buf, "..", 0, 0, (enum fuse_fill_dir_flags)0);
+    filler(buf, image_path + 1, &image_stat, 0, (enum fuse_fill_dir_flags)0);
 
     return 0;
 }
@@ -272,5 +279,46 @@ if ( options.headeronly ) {
     system(cmd);
 }
 #endif
-    return fuse_main(args.argc, args.argv, &sparsebundle_filesystem_operations, sparsebundlefr_data_ptr);
+
+    /* libfuse3's fuse_main sets max_threads to UINT_MAX as a sentinel and then
+     * its own check ("> 100000") prints a misleading warning. Use the lower-level
+     * API to pass an explicit SPARSEBUNDLEFS_MAX_THREADS. */
+    struct fuse_cmdline_opts opts;
+    if (fuse_parse_cmdline(&args, &opts) != 0)
+        return EXIT_FAILURE;
+
+    struct fuse *fuse = fuse_new(&args, &sparsebundle_filesystem_operations,
+                                 sizeof(sparsebundle_filesystem_operations),
+                                 sparsebundlefr_data_ptr);
+    if (!fuse) {
+        free(opts.mountpoint);
+        return EXIT_FAILURE;
+    }
+    if (fuse_mount(fuse, opts.mountpoint) != 0) {
+        fuse_destroy(fuse);
+        free(opts.mountpoint);
+        return EXIT_FAILURE;
+    }
+    if (fuse_daemonize(opts.foreground) != 0) {
+        fuse_unmount(fuse); fuse_destroy(fuse);
+        free(opts.mountpoint);
+        return EXIT_FAILURE;
+    }
+
+    int rc;
+    if (opts.singlethread) {
+        rc = fuse_loop(fuse);
+    } else {
+        struct fuse_loop_config *cfg = fuse_loop_cfg_create();
+        fuse_loop_cfg_set_clone_fd(cfg, opts.clone_fd);
+        fuse_loop_cfg_set_max_threads(cfg, SPARSEBUNDLEFS_MAX_THREADS);
+        rc = fuse_loop_mt(fuse, cfg);
+        fuse_loop_cfg_destroy(cfg);
+    }
+
+    fuse_unmount(fuse);
+    fuse_destroy(fuse);
+    free(opts.mountpoint);
+    fuse_opt_free_args(&args);
+    return rc < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

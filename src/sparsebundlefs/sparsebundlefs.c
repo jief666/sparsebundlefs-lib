@@ -35,8 +35,9 @@
 #define FUSE_USE_VERSION 26
 #endif
 
-// Comment next line if you want debug message on syslog
-#define syslog(Level, ...)  do { printf(__VA_ARGS__); printf("\n"); } while (0)
+// The original lib unconditionally printf'd via a macro; we use real syslog
+// instead so that -D (which sets LOG_UPTO(LOG_DEBUG)) actually gates DIAG output.
+// LOG_PERROR is set in main() so messages still appear on stderr.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // looks like I need that to get be32toh, getpass, etc... sometimes.
@@ -68,12 +69,18 @@
 	#include <endian.h>
 #endif
 #include <arpa/inet.h> // for htonl
+#include <pthread.h>
 
 #ifdef SPARSEBUNDLEFS_USE_LIBXML2
 #include <libxml/xpath.h>
 #endif
 
 #include "sparsebundlefs.h"
+
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <openssl/aes.h>
+#include <openssl/hmac.h>
 
 //assert(sizeof(off_t) >= sizeof(int8_t) && sizeof(off_t) <= sizeof(intmax_t));
 //const off_t OFF_T_MIN = sizeof(off_t) == sizeof(int8_t)   ? INT8_MIN    :
@@ -153,6 +160,7 @@ typedef struct sparsebundle_data_st
     off_t size;
     off_t opened_file_band_number;
     int opened_file_fd;
+    pthread_mutex_t band_lock;
 	read_band_func_type read_band_func;
 
 #ifdef CRYPTO_AVAILABLE
@@ -332,23 +340,31 @@ int unwrap_v2_password_header(cencrypted_v2_password_header *pwhdr, uint8_t *hma
 	#endif
 
 
-	if ( password != NULL ) {
-		#ifdef SPARSEBUNDLEFS_USE_OPENSSL
-			PKCS5_PBKDF2_HMAC_SHA1(password, strlen(password), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, sizeof(derived_key_openssl), derived_key_openssl);
-		#endif
-		#ifdef SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO
-			PBKDF2_HMAC_SHA1((const uint8_t *)password, strlen(password), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, derived_key, sizeof(derived_key));
-		#endif
-	}else{
-		char *aPassword = getpass("Password: ");
-		#ifdef SPARSEBUNDLEFS_USE_OPENSSL
-			PKCS5_PBKDF2_HMAC_SHA1(aPassword, strlen(aPassword), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, sizeof(derived_key_openssl), derived_key_openssl);
-		#endif
-		#ifdef SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO
-			PBKDF2_HMAC_SHA1((const uint8_t *)aPassword, strlen(aPassword), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, derived_key, sizeof(derived_key));
-		#endif
-		memset(aPassword, 0, strlen(aPassword));
+	const char *pw_to_use = password;
+	char *aPassword = NULL;
+	if ( password == NULL ) {
+		aPassword = getpass("Password: ");
+		pw_to_use = aPassword;
 	}
+	{
+		size_t plen = strlen(pw_to_use);
+		int has_high = 0;
+		for (size_t i = 0; i < plen; i++) if ((unsigned char)pw_to_use[i] > 0x7f) { has_high = 1; break; }
+		syslog(LOG_DEBUG, "DIAG: password strlen=%zu has_non_ascii=%d", plen, has_high);
+		syslog(LOG_DEBUG, "DIAG: kdf_algorithm=%u kdf_prng=%u kdf_iter=%u kdf_salt_len=%u keyblob_size=%u",
+			pwhdr->kdf_algorithm, pwhdr->kdf_prng_algorithm, pwhdr->kdf_iteration_count,
+			pwhdr->kdf_salt_len, pwhdr->encrypted_keyblob_size);
+		syslog(LOG_DEBUG, "DIAG: blob_enc_algorithm=0x%08x blob_enc_iv_size=%u blob_enc_key_bits=%u blob_enc_mode=%u blob_enc_padding=%u",
+			pwhdr->blob_enc_algorithm, pwhdr->blob_enc_iv_size, pwhdr->blob_enc_key_bits,
+			pwhdr->blob_enc_mode, pwhdr->blob_enc_padding);
+	}
+	#ifdef SPARSEBUNDLEFS_USE_OPENSSL
+		PKCS5_PBKDF2_HMAC_SHA1(pw_to_use, strlen(pw_to_use), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, sizeof(derived_key_openssl), derived_key_openssl);
+	#endif
+	#ifdef SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO
+		PBKDF2_HMAC_SHA1((const uint8_t *)pw_to_use, strlen(pw_to_use), (unsigned char*)pwhdr->kdf_salt, pwhdr->kdf_salt_len, pwhdr->kdf_iteration_count, derived_key, sizeof(derived_key));
+	#endif
+	if ( aPassword != NULL ) memset(aPassword, 0, strlen(aPassword));
 	#ifdef COMPARE_OPENSSL_AND_EMBEDDED_CRYPTO
 		if ( memcmp(derived_key_openssl, derived_key, sizeof(derived_key_openssl)) != 0 ) {
 			syslog(LOG_DEBUG, "PKCS5_PBKDF2_HMAC_SHA1 doesn't give the same result with embedded crypto");
@@ -376,6 +392,27 @@ int unwrap_v2_password_header(cencrypted_v2_password_header *pwhdr, uint8_t *hma
 #ifdef SPARSEBUNDLEFS_USE_EMBEDDED_CRYPTO
 	uint8_t blob[pwhdr->encrypted_keyblob_size];
 
+	if (pwhdr->blob_enc_algorithm == 0x80000001U) {
+		/* Modern Apple (Big Sur+) encrypted sparsebundle: AES-192-CBC keyblob wrap.
+		 * AES needs a 16-byte IV; the header stores 8 bytes, padded with zeros. */
+		uint8_t iv16[16];
+		memcpy(iv16, pwhdr->blob_enc_iv, 8);
+		memset(iv16 + 8, 0, 8);
+		EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+		int olen = 0, tlen = 0;
+		EVP_DecryptInit_ex(ctx, EVP_aes_192_cbc(), NULL, derived_key, iv16);
+		EVP_CIPHER_CTX_set_padding(ctx, 0);
+		EVP_DecryptUpdate(ctx, blob, &olen, pwhdr->encrypted_keyblob, pwhdr->encrypted_keyblob_size);
+		if (EVP_DecryptFinal_ex(ctx, blob + olen, &tlen)) olen += tlen;
+		EVP_CIPHER_CTX_free(ctx);
+		uint8_t pad = blob[pwhdr->encrypted_keyblob_size - 1];
+		syslog(LOG_DEBUG, "DIAG: AES-192-CBC unwrap pad=0x%02x", pad);
+		if (pad < 1 || pad > 16) return -1;
+		memcpy(aes_key, blob, *aes_key_size_ptr);
+		memcpy(hmacsha1_key, blob + *aes_key_size_ptr, HMACSHA1_KEY_SIZE);
+		return 0;
+	}
+
 	TripleDesInit();
 	TripleDesSetKey(derived_key);
 	TripleDesSetIV(pwhdr->blob_enc_iv);
@@ -383,6 +420,15 @@ int unwrap_v2_password_header(cencrypted_v2_password_header *pwhdr, uint8_t *hma
 //	uint32_t blob_len = pwhdr->encrypted_keyblob_size;
 
 	TripleDesDecryptCBC(blob, pwhdr->encrypted_keyblob, pwhdr->encrypted_keyblob_size);
+
+	{
+		uint32_t sz = pwhdr->encrypted_keyblob_size;
+		uint8_t pad = blob[sz - 1];
+		char hex[2*16+1]; hex[0]=0;
+		uint32_t start = sz >= 16 ? sz - 16 : 0;
+		for (uint32_t i = start; i < sz; i++) sprintf(hex + (i-start)*2, "%02x", blob[i]);
+		syslog(LOG_DEBUG, "DIAG: 3DES-CBC decrypted blob last byte (padding)=0x%02x (need 0x01..0x08); last 16 bytes=%s", pad, hex);
+	}
 
 	if (blob[pwhdr->encrypted_keyblob_size - 1] < 1 || blob[pwhdr->encrypted_keyblob_size - 1] > 8)
 		return -1;
@@ -455,6 +501,8 @@ int v2_read_token(const char* path, cencrypted_v2_header *v2headerPtr, uint8_t* 
 		exit(EXIT_FAILURE);
 	}
 	adjust_v2_header_byteorder(&v2header);
+	syslog(LOG_DEBUG, "DIAG: v2header sig=%.8s blocksize=%u keycount=%u",
+		v2header.sig, v2header.blocksize, v2header.keycount);
 	#ifdef DEBUG
 		dump_v2_header(&v2header);
 	#endif
@@ -478,6 +526,8 @@ int v2_read_token(const char* path, cencrypted_v2_header *v2headerPtr, uint8_t* 
 		}
 
 		adjust_v2_key_header_pointer_byteorder(&v2keyheader);
+		syslog(LOG_DEBUG, "DIAG: keyhdr[%u] type=%d offset=%d size=%d",
+			i, v2keyheader.header_type, v2keyheader.header_offset, v2keyheader.header_size);
 		#ifdef DEBUG
 			dump_v2_key_header(&v2keyheader);
 		#endif
@@ -665,6 +715,7 @@ int sparsebundle_iterate_bands(sparsebundle_data_t* sparsebundle_data, uint8_t* 
 //syslog(LOG_DEBUG, "iterating %zu bytes at offset %" PRId64, nbytes, offset);
 
     size_t bytes_read = 0;
+    pthread_mutex_lock(&sparsebundle_data->band_lock);
     while (bytes_read < nbytes) {
         off_t band_number = (offset + bytes_read) / sparsebundle_data->band_size;
         off_t band_offset = (offset + bytes_read) % sparsebundle_data->band_size;
@@ -704,6 +755,7 @@ last_band_offset = band_offset;
         if ( sparsebundle_data->opened_file_fd > -1 ) {
         	read = sparsebundle_data->read_band_func(sparsebundle_data, buffer+bytes_read, to_read, band_offset);
 			if (read < 0) {
+				pthread_mutex_unlock(&sparsebundle_data->band_lock);
 				return -1;
 			}
         }else{
@@ -714,6 +766,7 @@ last_band_offset = band_offset;
             ssize_t to_pad = to_read - read;
 //syslog(LOG_DEBUG, "missing %zd bytes from band %" PRId64", padding with zeroes (bytes_read=%zd, to_read=%zd, read=%zd)", to_pad, band_number, bytes_read, to_read, read);
             if ( to_pad+bytes_read+read > nbytes ) {
+				pthread_mutex_unlock(&sparsebundle_data->band_lock);
             	exit(1);
             }
             memset(buffer+bytes_read+read, 0, to_pad);
@@ -724,6 +777,7 @@ last_band_offset = band_offset;
 
 //syslog(LOG_DEBUG, "done processing band %" PRId64", %zd bytes left to read", band_number, nbytes - bytes_read);
     }
+    pthread_mutex_unlock(&sparsebundle_data->band_lock);
 
     assert(bytes_read == nbytes);
     return bytes_read;
@@ -814,6 +868,7 @@ int sparsebundlefs_close(void* sparsebundle_data)
 //syslog(LOG_DEBUG, "sparsebundle_close");
 	free(((sparsebundle_data_t*)sparsebundle_data)->path);
   	if ( ((sparsebundle_data_t*)sparsebundle_data)->opened_file_fd != -1 ) close(((sparsebundle_data_t*)sparsebundle_data)->opened_file_fd);
+	pthread_mutex_destroy(&((sparsebundle_data_t*)sparsebundle_data)->band_lock);
     return 0;
 }
 
@@ -966,6 +1021,7 @@ int sparsebundlefs_open(const char* path, const char* password, void* sparsebund
     sparsebundle_data->read_band_func = sparsebundle_read_process_band_not_encrypted;
     sparsebundle_data->opened_file_fd = -1;
     sparsebundle_data->opened_file_band_number = -1;
+    pthread_mutex_init(&sparsebundle_data->band_lock, NULL);
 
 
     {
